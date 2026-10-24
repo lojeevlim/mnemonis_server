@@ -419,3 +419,53 @@ describe("isolation and guards", () => {
     expect(dump).not.toContain(token);
   });
 });
+
+describe("adapter secret (X-Forwarded-For on /api/agent/*)", () => {
+  const SECRET = "t".repeat(24);
+  const hdr = (ip: string, secret?: string) => ({ "X-Forwarded-For": ip, ...(secret ? { "X-Mnemonis-Adapter-Secret": secret } : {}) });
+  const bad = (s: TestServer, h: Record<string, string>) => fetch(`${s.url}/api/agent/ping`, { headers: { ...agentHeaders("mn_" + "A".repeat(43)), ...h } });
+
+  it("with the secret, two clients with different IPs do not share a failure bucket", async () => {
+    const s = await startTestServer({ adapterSecret: SECRET, agentFailureLimiter: createFailureLimiter({ max: 2 }) });
+    try {
+      for (let i = 0; i < 2; i++) expect((await bad(s, hdr("1.1.1.1", SECRET))).status).toBe(401);
+      expect((await bad(s, hdr("1.1.1.1", SECRET))).status).toBe(429);
+      expect((await bad(s, hdr("2.2.2.2", SECRET))).status).toBe(401);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("without the secret (or a wrong one) a spoofed X-Forwarded-For does not escape the socket bucket", async () => {
+    for (const secret of [undefined, "u".repeat(24)]) {
+      const s = await startTestServer({ adapterSecret: SECRET, agentFailureLimiter: createFailureLimiter({ max: 2 }) });
+      try {
+        for (let i = 0; i < 2; i++) expect((await bad(s, hdr("1.1.1.1", secret))).status).toBe(401);
+        expect((await bad(s, hdr("2.2.2.2", secret))).status).toBe(429);
+      } finally {
+        await s.close();
+      }
+    }
+  });
+
+  it("unset secret: the header is ignored", async () => {
+    const s = await startTestServer({ agentFailureLimiter: createFailureLimiter({ max: 2 }) });
+    try {
+      for (let i = 0; i < 2; i++) expect((await bad(s, hdr("1.1.1.1", SECRET))).status).toBe(401);
+      expect((await bad(s, hdr("2.2.2.2", SECRET))).status).toBe(429);
+    } finally {
+      await s.close();
+    }
+  });
+
+  it("is not honoured on the web-facing /api routes, even with the right secret", async () => {
+    const s = await startTestServer({ adapterSecret: SECRET, failureLimiter: createFailureLimiter({ max: 2 }) });
+    try {
+      const call = (ip: string) => fetch(`${s.url}/api/state`, { headers: hdr(ip, SECRET) });
+      for (let i = 0; i < 2; i++) expect((await call("1.1.1.1")).status).toBe(401);
+      expect((await call("2.2.2.2")).status).toBe(429);
+    } finally {
+      await s.close();
+    }
+  });
+});

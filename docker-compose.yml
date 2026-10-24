@@ -40,6 +40,9 @@ services:
       MNEMONIS_ALLOWED_HOSTS: api:8787
       # What the web app shows in the `claude mcp add` command (GET /api/auth/config).
       MNEMONIS_MCP_URL: http://localhost:8788/mcp
+      # Optional shared secret with the adapter (same value on both sides): lets the API see each MCP client's real IP on
+      # /api/agent/* (per-client failed-auth buckets). Set MNEMONIS_ADAPTER_SECRET in .env (16+ characters); empty = off.
+      MNEMONIS_ADAPTER_SECRET: ${MNEMONIS_ADAPTER_SECRET:-}
     ports:
       - "127.0.0.1:8787:8787"
 
@@ -54,6 +57,7 @@ services:
       MNEMONIS_API_ALLOW_INSECURE_PRIVATE: "true"
       MCP_HOST: 0.0.0.0
       MCP_PORT: "8788"
+      MNEMONIS_ADAPTER_SECRET: ${MNEMONIS_ADAPTER_SECRET:-}
     ports:
       - "127.0.0.1:8788:8788"
 

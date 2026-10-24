@@ -21,6 +21,8 @@ export interface AppOptions {
   allowedHosts?: string[];
   /** Honour X-Forwarded-For for the pre-auth failure limiter (MNEMONIS_TRUST_PROXY). */
   trustProxy?: boolean;
+  /** MNEMONIS_ADAPTER_SECRET: with it, X-Forwarded-For from the adapter is honoured on /api/agent/* only. */
+  adapterSecret?: string | null;
   getPort: () => number;
   limiter?: RateLimiter;
   /** Counts failed credential checks on /api/* (session), per client. Separate from the /api/agent limiter. */
@@ -75,6 +77,7 @@ export function createApp(opts: AppOptions): Hono<AppEnv> {
     audit: opts.audit,
     accounts: opts.accounts,
     trustProxy: authOpts.trustProxy,
+    adapterSecret: opts.adapterSecret,
     failureLimiter: opts.agentFailureLimiter ?? createFailureLimiter(),
     contractLimiter: opts.contractLimiter ?? createFailureLimiter({ max: 60, windowMs: 60_000 }),
     writeLimiter: limiter,

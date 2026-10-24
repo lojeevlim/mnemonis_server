@@ -32,6 +32,8 @@ export interface Config {
   agentReadsPerMinute: number;
   /** The MCP adapter URL shown to users by GET /api/auth/config (MNEMONIS_MCP_URL), or null. */
   mcpUrl: string | null;
+  /** MNEMONIS_ADAPTER_SECRET: when set, X-Forwarded-For sent by the adapter (with the matching secret header) is honoured on /api/agent/* only. */
+  adapterSecret: string | null;
   host: string;
   port: number;
 }
@@ -68,7 +70,9 @@ export function validMcpUrl(v: string): boolean {
     return false;
   }
   const okScheme = u.protocol === "https:" || (u.protocol === "http:" && isLoopbackHost(u.hostname));
-  return okScheme && u.username === "" && u.password === "" && u.search === "" && u.hash === "" && u.pathname === "/mcp" && !v.includes("?") && !v.includes("#");
+  // The URL ends up in a shell command: only a plain DNS name / IPv4 literal or a bracketed IPv6 literal is accepted.
+  const okHost = /^[A-Za-z0-9.-]+$/.test(u.hostname) || /^\[[0-9A-Fa-f:.]+\]$/.test(u.hostname);
+  return okScheme && okHost && u.username === "" && u.password === "" && u.search === "" && u.hash === "" && u.pathname === "/mcp" && !v.includes("?") && !v.includes("#");
 }
 
 const schema = z.object({
@@ -91,6 +95,8 @@ const schema = z.object({
   MNEMONIS_AGENT_WRITES_PER_MINUTE: z.preprocess(empty, z.coerce.number().int().min(1).max(100_000).default(60)),
   MNEMONIS_AGENT_READS_PER_MINUTE: z.preprocess(empty, z.coerce.number().int().min(1).max(1_000_000).default(300)),
   MNEMONIS_MCP_URL: opt(z.string().trim()),
+  MNEMONIS_PUBLIC_MCP_URL: opt(z.string().trim()),
+  MNEMONIS_ADAPTER_SECRET: opt(z.string()),
   HOST: z.preprocess(empty, z.string().trim().default("127.0.0.1")),
   PORT: z.preprocess(empty, z.coerce.number().int().min(0).max(65535).default(8787)),
 });
@@ -119,8 +125,13 @@ export function parseConfig(env: Record<string, string | undefined> = process.en
     problems.push("MNEMONIS_SESSION_IDLE_DAYS must not exceed MNEMONIS_SESSION_MAX_DAYS");
   }
 
-  const mcpUrl = e.MNEMONIS_MCP_URL ?? DEFAULT_MCP_URL;
-  if (!validMcpUrl(mcpUrl)) problems.push("MNEMONIS_MCP_URL must be an https URL (or http on localhost) ending in /mcp, without credentials, query or fragment");
+  // MNEMONIS_PUBLIC_MCP_URL is an alias (the design doc's name); MNEMONIS_MCP_URL wins when both are set.
+  const mcpUrl = e.MNEMONIS_MCP_URL ?? e.MNEMONIS_PUBLIC_MCP_URL ?? DEFAULT_MCP_URL;
+  if (!validMcpUrl(mcpUrl)) problems.push("MNEMONIS_MCP_URL (or MNEMONIS_PUBLIC_MCP_URL) must be an https URL (or http on localhost) ending in /mcp, without credentials, query or fragment");
+
+  if (e.MNEMONIS_ADAPTER_SECRET !== undefined && !/^[\x21-\x7e]{16,256}$/.test(e.MNEMONIS_ADAPTER_SECRET)) {
+    problems.push("MNEMONIS_ADAPTER_SECRET must be 16-256 printable ASCII characters without spaces");
+  }
 
   const allowedOrigins = list(e.MNEMONIS_ALLOWED_ORIGINS);
   // Registration defaults to open only when the server is reachable from this machine alone.
@@ -150,6 +161,7 @@ export function parseConfig(env: Record<string, string | undefined> = process.en
     agentWritesPerMinute: e.MNEMONIS_AGENT_WRITES_PER_MINUTE,
     agentReadsPerMinute: e.MNEMONIS_AGENT_READS_PER_MINUTE,
     mcpUrl,
+    adapterSecret: e.MNEMONIS_ADAPTER_SECRET ?? null,
     host: e.HOST,
     port: e.PORT,
   };

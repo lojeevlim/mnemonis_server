@@ -81,6 +81,7 @@ export interface TestServerOptions {
   allowedOrigins?: string[];
   allowedHosts?: string[];
   trustProxy?: boolean;
+  adapterSecret?: string | null;
   maxMcpTokens?: number;
   /** Per-user storage quotas of the PgStore (default: the production defaults, 5 MB / 5000 memories). */
   quotas?: Partial<Quotas>;
@@ -123,6 +124,7 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Tes
     allowedOrigins: opts.allowedOrigins ?? ["http://localhost:5173"],
     allowedHosts: opts.allowedHosts,
     trustProxy: opts.trustProxy,
+    adapterSecret: opts.adapterSecret,
     limiter: opts.limiter ?? createRateLimiter(),
     // Every test request comes from 127.0.0.1: keep the per-client limiters out of the way unless a test sets them.
     failureLimiter: opts.failureLimiter ?? noLimit,

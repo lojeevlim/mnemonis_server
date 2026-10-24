@@ -33,6 +33,7 @@ async function main(): Promise<void> {
       allowedOrigins: parseAllowedOrigins(cfg.allowedOrigins.join(",")),
       allowedHosts: cfg.allowedHosts,
       trustProxy: cfg.trustProxy,
+      adapterSecret: cfg.adapterSecret,
       limiter: createRateLimiter({ max: cfg.agentWritesPerMinute }),
       readLimiter: createRateLimiter({ max: cfg.agentReadsPerMinute, noun: "reads" }),
       maxPending: cfg.maxPending,

@@ -1,3 +1,4 @@
+import { shellQuote } from "./cli/shell.js";
 import { isLoopbackHost, proxyWarnings, type Config } from "./config.js";
 
 /**
@@ -29,7 +30,7 @@ export function startupBanner(cfg: Config, port: number): Banner {
     ...registerExample(port),
     "Then create an MCP token (shown once) with the session token from that response:",
     `  curl -sS -X POST http://localhost:${port}/api/tokens -H "Authorization: Bearer ms_..." -H "Content-Type: application/json" -d '{"label":"claude-code"}'`,
-    `  claude mcp add --transport http mnemonis ${cfg.mcpUrl ?? "<MCP-ADAPTER-URL>"} --header "Authorization: Bearer mn_..."\n`,
+    `  claude mcp add --transport http mnemonis ${cfg.mcpUrl ? shellQuote(cfg.mcpUrl) : "<MCP-ADAPTER-URL>"} --header "Authorization: Bearer mn_..."\n`,
     "Forgot a password? On the server machine: npm run user -- reset <email> (see the README).\n",
   ];
   return { warnings, lines };

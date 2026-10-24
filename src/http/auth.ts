@@ -1,3 +1,4 @@
+import { createHash, timingSafeEqual } from "node:crypto";
 import { getConnInfo } from "@hono/node-server/conninfo";
 import type { Context, MiddlewareHandler } from "hono";
 import type { AccountService } from "../auth/accounts.js";
@@ -19,7 +20,27 @@ export interface AuthContext {
   sessionExpiresAt?: Date;
 }
 
-export type AppEnv = { Variables: { auth: AuthContext } };
+export type AppEnv = { Variables: { auth: AuthContext; viaAdapter?: boolean } };
+
+export const ADAPTER_SECRET_HEADER = "x-mnemonis-adapter-secret";
+
+const digest = (s: string) => createHash("sha256").update(s).digest();
+
+/** Timing-safe comparison of a presented secret with the configured one (both hashed first, so lengths do not leak). */
+export function secretMatches(presented: string | undefined, expected: string): boolean {
+  return presented !== undefined && timingSafeEqual(digest(presented), digest(expected));
+}
+
+/**
+ * Mounted on /api/agent/* ONLY. When MNEMONIS_ADAPTER_SECRET is configured and the request carries a matching
+ * X-Mnemonis-Adapter-Secret, the request came from our own adapter and its X-Forwarded-For (one IP literal, the real
+ * MCP client) is honoured by clientKey. A missing or wrong secret is simply ignored: the socket address is used.
+ * The secret is never logged or echoed.
+ */
+export const adapterTrust = (secret: string | null | undefined): MiddlewareHandler<AppEnv> => async (c, next) => {
+  if (secret && secretMatches(c.req.header(ADAPTER_SECRET_HEADER), secret)) c.set("viaAdapter", true);
+  await next();
+};
 
 export const MAX_AUTH_HEADER_CHARS = 8192;
 const BEARER_RE = /^Bearer ([A-Za-z0-9._~+/-]+=*)$/i; // the auth scheme is case-insensitive (RFC 7235); the credential is not
@@ -69,11 +90,12 @@ export function createFailureLimiter(opts: { max?: number; windowMs?: number; ma
 /**
  * Client bucket used for the pre-auth limiters, the login throttle and the audit `client` field: a VALIDATED address
  * (net.isIP), never raw header text. The socket address by default (coarse: clients behind one NAT/proxy share a bucket).
- * X-Forwarded-For is honoured only when MNEMONIS_TRUST_PROXY is set, and then only its last entry (the one appended by
+ * X-Forwarded-For is honoured only when MNEMONIS_TRUST_PROXY is set (or, on /api/agent/* only, when the request proved
+ * itself to be from the adapter with MNEMONIS_ADAPTER_SECRET, see adapterTrust), and then only its last entry (the one appended by
  * our own proxy); an entry that is not an IP literal falls back to the socket address. IPv6 is bucketed by /64.
  */
 export function clientKey(c: Context, trustProxy: boolean): string {
-  if (trustProxy) {
+  if (trustProxy || c.get("viaAdapter") === true) {
     const fromProxy = ipBucket(c.req.header("x-forwarded-for")?.split(",").pop());
     if (fromProxy) return fromProxy;
   }

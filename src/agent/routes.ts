@@ -3,7 +3,7 @@ import type { Context, Hono, MiddlewareHandler } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { idsOf, type AuditLog } from "../audit.js";
-import { clientKey, createAuthMiddleware, type AppEnv, type FailureLimiter } from "../http/auth.js";
+import { adapterTrust, clientKey, createAuthMiddleware, type AppEnv, type FailureLimiter } from "../http/auth.js";
 import { errorBody } from "../http/cors.js";
 import { statusFor } from "../http/rest.js";
 import type { AccountService } from "../auth/accounts.js";
@@ -25,6 +25,8 @@ export interface AgentRouteOptions {
   audit: AuditLog;
   accounts: Pick<AccountService, "verifyMcp" | "verifySession">;
   trustProxy: boolean;
+  /** MNEMONIS_ADAPTER_SECRET: lets the adapter's X-Forwarded-For be honoured on this surface only (null/unset = never). */
+  adapterSecret?: string | null;
   /** Pre-auth failure limiter of this surface (its own instance). */
   failureLimiter: FailureLimiter;
   /** Limiter of the public /api/agent/contract endpoint. */
@@ -65,6 +67,7 @@ const err = (c: Context, status: 400 | 413 | 415 | 426 | 500, code: string, mess
  */
 export function registerAgentRoutes(app: Hono<AppEnv>, o: AgentRouteOptions): void {
   app.use("/api/agent/*", agentEnvelope);
+  app.use("/api/agent/*", adapterTrust(o.adapterSecret));
 
   // Public, tiny, limited: lets the adapter detect a contract it does not support.
   app.get("/api/agent/contract", (c) => {

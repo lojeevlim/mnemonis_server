@@ -2,6 +2,7 @@ import { createInterface } from "node:readline/promises";
 import { validMcpUrl } from "../config.js";
 import { pendingChanges, type Relation, type WorkspaceState } from "../domain/index.js";
 import { ApiClient, sanitize } from "./client.js";
+import { shellQuote } from "./shell.js";
 import { readHidden, type PromptIo } from "./prompt.js";
 import { clearSession, loadSession, saveSession, sessionPaths } from "./session.js";
 import { CliError, guardedFetch, parseOrigin, passwordLogin, remoteLogout } from "./http.js";
@@ -179,8 +180,8 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           out("WARNING: the token is long-lived and, once pasted into this command, lands in your shell history and in process arguments. Clear it from history, and revoke it with `tokens revoke` if it leaks.");
           // The MCP adapter's URL is published by the server (GET /api/auth/config); it is shown only if it passes the same check the server applies.
           const cfg = await client.request<{ mcpUrl?: unknown }>("GET", "/api/auth/config").catch(() => ({ mcpUrl: null }));
-          const mcpUrl = typeof cfg.mcpUrl === "string" && validMcpUrl(cfg.mcpUrl) ? cfg.mcpUrl : "<MCP-ADAPTER-URL>";
-          out(`claude mcp add --transport http mnemonis ${mcpUrl} --header "Authorization: Bearer ${t.token}"`);
+          const mcpUrl = typeof cfg.mcpUrl === "string" && validMcpUrl(cfg.mcpUrl) ? shellQuote(cfg.mcpUrl) : "<MCP-ADAPTER-URL>";
+          out(`claude mcp add --transport http mnemonis ${mcpUrl} --header ${shellQuote(`Authorization: Bearer ${t.token}`)}`);
           return 0;
         }
         if (sub === "revoke") {

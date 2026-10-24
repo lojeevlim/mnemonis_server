@@ -1,13 +1,12 @@
-import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { afterEach, beforeEach, describe as baseDescribe, expect, it } from "vitest";
 import { createRateLimiter } from "../src/service/guards.js";
-import { callTool, connectMcp, startTestServer, TEST_DB_URL, type TestServer, type TestUser } from "./helpers.js";
+import { agentHeaders, callTool, connectMcp, startTestServer, TEST_DB_URL, type AgentClient, type TestServer, type TestUser } from "./helpers.js";
 
 const describe = baseDescribe.skipIf(!TEST_DB_URL);
 
 let t: TestServer;
 const servers: TestServer[] = [];
-const clients: Client[] = [];
+const clients: AgentClient[] = [];
 const start = async (o: Parameters<typeof startTestServer>[0] = {}) => {
   const s = await startTestServer(o);
   servers.push(s);
@@ -22,7 +21,7 @@ beforeEach(async () => {
   t = await start();
 });
 afterEach(async () => {
-  await Promise.all(clients.splice(0).map((c) => c.close().catch(() => undefined)));
+  clients.splice(0);
   await Promise.all(servers.splice(0).map((s) => s.close()));
 });
 
@@ -167,8 +166,7 @@ describe("revoked, expired, disabled and deleted credentials are refused per use
   it("one user's session or token problems never affect the other", async () => {
     const tokA = await t.a.mcpToken();
     const tokB = await t.b.mcpToken();
-    const mcpStatus = async (token: string) =>
-      (await fetch(`${t.url}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "0" } } }) })).status;
+    const mcpStatus = async (token: string) => (await fetch(`${t.url}/api/agent/ping`, { headers: agentHeaders(token) })).status;
 
     // revoked session
     await t.pool.query("UPDATE sessions SET revoked_at = now() WHERE user_id = $1", [t.a.id]);
@@ -203,8 +201,8 @@ describe("revoked, expired, disabled and deleted credentials are refused per use
     expect(list).not.toContain(bTok.id);
     expect(list).not.toContain("b-secret-label");
     expect((await t.a.api(`/api/tokens/${bTok.id}`, { method: "DELETE" })).status).toBe(404);
-    const stillWorks = await fetch(`${t.url}/mcp`, { method: "POST", headers: { "Content-Type": "application/json", Accept: "application/json, text/event-stream", Authorization: `Bearer ${bTok.token}` }, body: "{}" });
-    expect(stillWorks.status).not.toBe(401);
+    const stillWorks = await fetch(`${t.url}/api/agent/ping`, { headers: agentHeaders(bTok.token) });
+    expect(stillWorks.status).toBe(200);
     const me = (await (await t.a.api("/api/auth/me")).json()) as { id: string; email: string };
     expect(me).toMatchObject({ id: t.a.id, email: t.a.email });
   });

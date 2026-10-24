@@ -1,5 +1,5 @@
 // Smoke test: a throw-away multi-user server (TEST_DATABASE_URL) on a random port.
-// Register/login over REST, session-only /api, mcp token creation, MCP tools, and the credential-kind separation.
+// Register/login over REST, session-only /api, mcp token creation, the internal /api/agent tools, and the credential-kind separation.
 // Never touches ~/.mnemonis. Run it ONLY against a throw-away local database: createPool refuses a remote host
 // (see src/db/guard.ts) and the user plus its throttle/audit rows are removed at the end.
 import { randomUUID } from "node:crypto";
@@ -107,17 +107,21 @@ try {
   check("session POST /api/tokens creates an mcp token", minted.status === 201 && mintedBody.token?.startsWith("mn_"));
   const mcpAuth = { Authorization: `Bearer ${mintedBody.token}` };
 
-  const mcpHeaders = { ...mcpAuth, "Content-Type": "application/json", Accept: "application/json, text/event-stream" };
-  const rpc = async (body: unknown) => (await fetch(`${base}/mcp`, { method: "POST", headers: mcpHeaders, body: JSON.stringify(body) })).json() as Promise<any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-  await rpc({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } } });
-  const tools = await rpc({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  check("MCP tools/list with the mcp token", tools.result.tools.length === 11, `${tools.result.tools.length} tools`);
-  const call = await rpc({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "memory_save", arguments: { title: "From MCP" } } });
-  const payload = JSON.parse(call.result.content[0].text);
-  check("MCP memory_save is pending", !call.result.isError && payload.status === "pending", payload.message);
+  // The internal agent surface (what the MCP adapter calls): mn_ token + contract header, one POST per tool.
+  const agentHeaders = { ...mcpAuth, "Content-Type": "application/json", "X-Mnemonis-Contract": "1" };
+  const ping = await fetch(`${base}/api/agent/ping`, { headers: agentHeaders });
+  check("GET /api/agent/ping with the mcp token", ping.status === 200 && JSON.stringify(await ping.json()) === '{"ok":true,"contract":1}');
+  const contract = await fetch(`${base}/api/agent/contract`);
+  const contractBody = (await contract.json()) as { tools: string[] };
+  check("GET /api/agent/contract lists 11 tools", contract.status === 200 && contractBody.tools.length === 11, `${contractBody.tools.length} tools`);
+  const call = await fetch(`${base}/api/agent/memory/save`, { method: "POST", headers: agentHeaders, body: JSON.stringify({ title: "From the agent API" }) });
+  const payload = (await call.json()) as { status: string; message: string; revisionId: string };
+  check("agent memory_save is pending", call.status === 200 && payload.status === "pending", payload.message);
 
-  const sessionOnMcp = await fetch(`${base}/mcp`, { method: "POST", headers: { ...sessionAuth, "Content-Type": "application/json", Accept: "application/json, text/event-stream" }, body: "{}" });
-  check("session on /mcp -> 401", sessionOnMcp.status === 401);
+  const sessionOnAgent = await fetch(`${base}/api/agent/ping`, { headers: { ...sessionAuth, "X-Mnemonis-Contract": "1" } });
+  check("session on /api/agent -> 401", sessionOnAgent.status === 401);
+  const gone = await fetch(`${base}/mcp`, { method: "POST", headers: mcpAuth, body: "{}" });
+  check("/mcp is gone (410), the MCP adapter is a separate server", gone.status === 410);
 
   const approveBody = JSON.stringify({ revisionId: payload.revisionId });
   const mcpApprove = await fetch(`${base}/api/ops/approve`, { method: "POST", headers: { ...mcpAuth, "Content-Type": "application/json" }, body: approveBody });

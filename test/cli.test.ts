@@ -420,7 +420,7 @@ describe("no session / unreachable server", () => {
 describe.skipIf(!TEST_DB_URL)("CLI against a real test server", () => {
   let t: TestServer;
   beforeAll(async () => {
-    t = await startTestServer();
+    t = await startTestServer({ mcpUrl: "http://localhost:8788/mcp" });
   });
   afterAll(async () => {
     await t.close();
@@ -448,7 +448,7 @@ describe.skipIf(!TEST_DB_URL)("CLI against a real test server", () => {
     expect(text.split(token!).length - 1).toBe(1); // printed exactly once
     expect(text).toMatch(/shell history/);
     expect(text).toMatch(/long-lived/);
-    expect(text).toContain(`claude mcp add --transport http mnemonis ${t.url}/mcp --header "Authorization: Bearer ${token}"`);
+    expect(text).toContain(`claude mcp add --transport http mnemonis http://localhost:8788/mcp --header "Authorization: Bearer ${token}"`);
     const id = /Token (\S+) created/.exec(text)![1]!;
     h.out.length = 0;
     expect(await h.run("tokens", "list")).toBe(0);

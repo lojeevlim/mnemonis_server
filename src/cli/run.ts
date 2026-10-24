@@ -1,4 +1,5 @@
 import { createInterface } from "node:readline/promises";
+import { validMcpUrl } from "../config.js";
 import { pendingChanges, type Relation, type WorkspaceState } from "../domain/index.js";
 import { ApiClient, sanitize } from "./client.js";
 import { readHidden, type PromptIo } from "./prompt.js";
@@ -176,7 +177,10 @@ export async function runCli(argv: string[], deps: CliDeps): Promise<number> {
           if (typeof t.token !== "string" || !/^mn_[A-Za-z0-9_-]+$/.test(t.token)) throw new CliError("The server returned a malformed token; it was not displayed. Revoke it with: tokens list / tokens revoke <id>");
           out(`Token ${sanitize(t.id, 80)} created${t.expiresAt ? ` (expires ${when(t.expiresAt)})` : ""}. The token appears ONCE, in the command below; it cannot be shown again.`);
           out("WARNING: the token is long-lived and, once pasted into this command, lands in your shell history and in process arguments. Clear it from history, and revoke it with `tokens revoke` if it leaks.");
-          out(`claude mcp add --transport http mnemonis ${apiUrl}/mcp --header "Authorization: Bearer ${t.token}"`);
+          // The MCP adapter's URL is published by the server (GET /api/auth/config); it is shown only if it passes the same check the server applies.
+          const cfg = await client.request<{ mcpUrl?: unknown }>("GET", "/api/auth/config").catch(() => ({ mcpUrl: null }));
+          const mcpUrl = typeof cfg.mcpUrl === "string" && validMcpUrl(cfg.mcpUrl) ? cfg.mcpUrl : "<MCP-ADAPTER-URL>";
+          out(`claude mcp add --transport http mnemonis ${mcpUrl} --header "Authorization: Bearer ${t.token}"`);
           return 0;
         }
         if (sub === "revoke") {

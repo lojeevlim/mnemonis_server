@@ -447,7 +447,7 @@ describe("logout, me, password change, delete account", () => {
     const ok = await del(victim.password);
     expect(ok.status).toBe(204);
     expect((await victim.api("/api/state")).status).toBe(401);
-    const mcp = await fetch(`${s.url}/mcp`, { method: "POST", headers: { ...json, Accept: "application/json, text/event-stream", Authorization: `Bearer ${token}` }, body: "{}" });
+    const mcp = await fetch(`${s.url}/api/agent/ping`, { headers: { "X-Mnemonis-Contract": "1", Authorization: `Bearer ${token}` } });
     expect(mcp.status).toBe(401);
     expect((await login(s, victim.email, victim.password)).status).toBe(401);
     for (const t of ["users WHERE id", "workspaces WHERE user_id", "sessions WHERE user_id", "api_tokens WHERE user_id"]) {

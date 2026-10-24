@@ -25,13 +25,12 @@ afterEach(async () => {
 });
 
 const json = { "Content-Type": "application/json" };
-const initBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "0" } } });
-const mcpPost = (s: TestServer, headers: Record<string, string>) =>
-  fetch(`${s.url}/mcp`, { method: "POST", headers: { ...json, Accept: "application/json, text/event-stream", ...headers }, body: initBody });
+/** The agent surface (mn_ tokens only): GET /api/agent/ping is 200 for a valid token and the uniform 401 otherwise. */
+const mcpPost = (s: TestServer, headers: Record<string, string>) => fetch(`${s.url}/api/agent/ping`, { headers: { "X-Mnemonis-Contract": "1", ...headers } });
 
 /** Everything an attacker could use to tell refusals apart. */
 async function shape(r: Response) {
-  const headers = [...r.headers.entries()].filter(([k]) => k !== "date").sort(([a], [b]) => a.localeCompare(b));
+  const headers = [...r.headers.entries()].filter(([k]) => k !== "date" && k !== "x-request-id").sort(([a], [b]) => a.localeCompare(b));
   return { status: r.status, body: await r.text(), headers };
 }
 
@@ -133,7 +132,7 @@ describe("identical 401 for every credential refusal", () => {
 });
 
 describe("credential kind separation", () => {
-  it("an mcp token is refused on every REST route, a session is refused on /mcp", async () => {
+  it("an mcp token is refused on every REST route, a session is refused on /api/agent", async () => {
     const { token } = await t.a.mcpToken();
     const h = { Authorization: `Bearer ${token}` };
     const baseline = await shape(await fetch(`${t.url}/api/state`));
@@ -189,7 +188,7 @@ describe("token lifecycle", () => {
     for (const path of ["/api/me", "/api/state", "/api/export"]) expect(await (await t.a.api(path)).text()).not.toContain(body.token);
   });
 
-  it("the new token works on /mcp, and revocation is effective on the very next request", async () => {
+  it("the new token works on /api/agent, and revocation is effective on the very next request", async () => {
     const { id, token } = (await (await create()).json()) as { id: string; token: string };
     expect((await mcpPost(t, { Authorization: `Bearer ${token}` })).status).toBe(200);
     const del = await t.a.api(`/api/tokens/${id}`, { method: "DELETE" });
@@ -276,14 +275,16 @@ describe("Host allowlist, failure limiter and infrastructure errors", () => {
     expect(blocked.headers.get("retry-after")).toBe("60");
     expect((await s.a.api("/api/state")).status).toBe(429);
     expect((await fetch(`${s.url}/api/health`)).status).toBe(200); // health is outside the auth path
-    // /mcp has its own limiter instance: failures on /api never lock out /mcp (and vice versa)
+    // /api/agent has its own limiter instance: failures on /api never lock out /api/agent (and vice versa)
     expect((await mcpPost(s, {})).status).toBe(401);
   });
 
-  it("the /mcp failure limiter is separate from the /api one", async () => {
-    const s = await start({ mcpFailureLimiter: createFailureLimiter({ max: 2 }), failureLimiter: createFailureLimiter({ max: 50 }) });
+  it("the /api/agent failure limiter is separate from the /api one and uses its own error code", async () => {
+    const s = await start({ agentFailureLimiter: createFailureLimiter({ max: 2 }), failureLimiter: createFailureLimiter({ max: 50 }) });
     for (let i = 0; i < 2; i++) expect((await mcpPost(s, {})).status).toBe(401);
-    expect((await mcpPost(s, {})).status).toBe(429);
+    const limited = await mcpPost(s, {});
+    expect(limited.status).toBe(429);
+    expect(((await limited.json()) as { error: { code: string } }).error.code).toBe("too_many_failed_attempts");
     expect((await fetch(`${s.url}/api/state`)).status).toBe(401); // /api still answers normally
     expect((await s.a.api("/api/state")).status).toBe(200);
   });

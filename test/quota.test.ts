@@ -73,20 +73,16 @@ describe("per-user quotas", () => {
     expect(big.status).toBe(413);
   });
 
-  it("MCP writes: an agent save over the cap gets an isError result with code too_large and writes nothing", async () => {
+  it("Agent writes: a save over the cap is refused with code too_large and writes nothing", async () => {
     const s = await start({ quotas: { maxMemories: 2 } });
     const { token } = await s.a.mcpToken();
     const client = await connectMcp(s.url, s.a.mcpHeaders(token));
-    try {
-      expect((await callTool(client, "memory_save", { title: "one" })).isError).toBe(false);
-      expect((await callTool(client, "memory_save", { title: "two" })).isError).toBe(false);
-      const third = await callTool(client, "memory_save", { title: "three" });
-      expect(third.isError).toBe(true);
-      expect(third.data.error).toMatchObject({ code: "too_large" });
-      expect(Object.keys((await s.service.getState()).state.memories)).toHaveLength(2);
-    } finally {
-      await client.close();
-    }
+    expect((await callTool(client, "memory_save", { title: "one" })).isError).toBe(false);
+    expect((await callTool(client, "memory_save", { title: "two" })).isError).toBe(false);
+    const third = await callTool(client, "memory_save", { title: "three" });
+    expect(third.isError).toBe(true);
+    expect(third.data.error).toMatchObject({ code: "too_large" });
+    expect(Object.keys((await s.service.getState()).state.memories)).toHaveLength(2);
   });
 
   it("PgStore.transact / replace / write all enforce it (StoreError too_large), and writes that do not grow a workspace already over its cap still work", async () => {

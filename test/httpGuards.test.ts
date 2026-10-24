@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { createFailureLimiter, parseBearer } from "../src/http/auth.js";
 import { hostAllowed } from "../src/http/cors.js";
-import { rememberBounded } from "../src/mcp/server.js";
 import { createRateLimiter } from "../src/service/guards.js";
 
 describe("parseBearer", () => {
@@ -31,18 +30,6 @@ describe("hostAllowed", () => {
 });
 
 describe("bounded maps", () => {
-  it("rememberBounded evicts the oldest entry instead of clearing everything", () => {
-    const m = new Map<string, string>();
-    for (const k of ["a", "b", "c"]) rememberBounded(m, k, k, 3);
-    rememberBounded(m, "d", "d", 3);
-    expect([...m.keys()]).toEqual(["b", "c", "d"]);
-    rememberBounded(m, "b", "b2", 3); // refresh makes it the newest
-    rememberBounded(m, "e", "e", 3);
-    expect([...m.keys()]).toEqual(["d", "b", "e"]);
-    expect(m.size).toBe(3);
-    expect(m.get("b")).toBe("b2");
-  });
-
   it("the write rate limiter caps tracked keys (oldest evicted) and forgets expired keys", () => {
     let now = 0;
     const l = createRateLimiter({ max: 1, windowMs: 1000, maxKeys: 2, now: () => now });

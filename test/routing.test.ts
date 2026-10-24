@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe as baseDescribe, expect, it, vi } from "vitest";
 import { createPgAudit } from "../src/audit.js";
 import { createFailureLimiter } from "../src/http/auth.js";
-import { rawRequest, startTestServer, TEST_DB_URL, type TestServer } from "./helpers.js";
+import { agentPost, rawRequest, startTestServer, TEST_DB_URL, type TestServer } from "./helpers.js";
 
 const describe = baseDescribe.skipIf(!TEST_DB_URL);
 
@@ -21,7 +21,6 @@ afterEach(async () => {
 });
 
 const json = { "Content-Type": "application/json" };
-const initBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "0" } } });
 const raw = (path: string, method = "GET", headers: Record<string, string> = {}) =>
   rawRequest(t.port, { path, method, host: `127.0.0.1:${t.port}`, headers });
 
@@ -66,7 +65,7 @@ describe("routing quirks are pinned", () => {
   });
 
   it("HEAD on authenticated routes without credentials is 401, never data", async () => {
-    for (const path of ["/api/state", "/api/export", "/api/me", "/api/tokens", "/mcp"]) {
+    for (const path of ["/api/state", "/api/export", "/api/me", "/api/tokens", "/api/agent/ping"]) {
       const r = await fetch(`${t.url}${path}`, { method: "HEAD" });
       expect({ path, status: r.status }).toEqual({ path, status: 401 });
       expect(r.headers.get("www-authenticate")).toBe('Bearer realm="mnemonis"');
@@ -75,7 +74,7 @@ describe("routing quirks are pinned", () => {
 
   it("preflight (OPTIONS, incl. the DELETE preflight) is 204 for an allowed origin and 403 for a disallowed one", async () => {
     const origin = "http://localhost:5173";
-    for (const [path, method] of [["/api/state", "PUT"], ["/api/tokens/abc", "DELETE"], ["/api/tokens", "POST"], ["/mcp", "POST"]] as const) {
+    for (const [path, method] of [["/api/state", "PUT"], ["/api/tokens/abc", "DELETE"], ["/api/tokens", "POST"]] as const) {
       const ok = await fetch(`${t.url}${path}`, {
         method: "OPTIONS",
         headers: { Origin: origin, "Access-Control-Request-Method": method, "Access-Control-Request-Headers": "authorization" },
@@ -94,16 +93,20 @@ describe("routing quirks are pinned", () => {
 });
 
 describe("401 responses are byte-identical across doors and failure reasons", () => {
-  it("/api/*, /mcp and HEAD give the same status, headers (minus Date) and body", async () => {
+  it("/api/*, /api/agent/* and HEAD give the same status, headers (minus Date and the agent's request id/contract) and body", async () => {
     const api = await shape(await fetch(`${t.url}/api/state`));
-    const mcp = await shape(await fetch(`${t.url}/mcp`, { method: "POST", headers: { ...json, Accept: "application/json, text/event-stream" }, body: initBody }));
+    const agentHeaders = { "X-Mnemonis-Contract": "1" };
+    const agentShape = async (r: Response) => {
+      const s = await shape(r);
+      return { ...s, headers: s.headers.filter(([k]) => k !== "x-request-id" && k !== "x-mnemonis-contract") };
+    };
+    const agent = await agentShape(await fetch(`${t.url}/api/agent/ping`, { headers: agentHeaders }));
     expect(api.status).toBe(401);
-    // The doors differ only by the REST-only Cache-Control: no-store; everything else is identical.
-    expect(mcp).toEqual({ ...api, headers: api.headers.filter(([k]) => k !== "cache-control") });
+    expect(agent).toEqual(api);
     const garbageApi = await shape(await fetch(`${t.url}/api/state`, { headers: { Authorization: "Bearer a.b.c" } }));
-    const garbageMcp = await shape(await fetch(`${t.url}/mcp`, { method: "POST", headers: { ...json, Authorization: `Bearer mn_${"A".repeat(43)}` }, body: initBody }));
+    const garbageAgent = await agentShape(await fetch(`${t.url}/api/agent/ping`, { headers: { ...agentHeaders, Authorization: `Bearer mn_${"A".repeat(43)}` } }));
     expect(garbageApi).toEqual(api);
-    expect(garbageMcp).toEqual({ ...api, headers: api.headers.filter(([k]) => k !== "cache-control") });
+    expect(garbageAgent).toEqual(api);
     const head = await fetch(`${t.url}/api/state`, { method: "HEAD" });
     expect(head.status).toBe(401);
     expect(await head.text()).toBe("");
@@ -120,14 +123,11 @@ describe("oversize bodies are refused with 413", () => {
     expect(small.status).toBe(201);
   });
 
-  it("POST /mcp over 1 MiB", async () => {
+  it("POST /api/agent/memory/save over 512 KiB", async () => {
     const { token } = await t.a.mcpToken();
-    const r = await fetch(`${t.url}/mcp`, {
-      method: "POST",
-      headers: { ...json, Accept: "application/json, text/event-stream", ...t.a.mcpHeaders(token) },
-      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "x", params: { pad: "x".repeat(1024 * 1024 + 1) } }),
-    });
+    const r = await agentPost(t.url, token, "memory_save", JSON.stringify({ title: "x", content: "x".repeat(512 * 1024 + 1) }));
     expect(r.status).toBe(413);
+    expect(await r.json()).toEqual({ error: { code: "too_large", message: "Request body is too large" } });
   });
 
   it("PUT /api/state over the import limit", async () => {

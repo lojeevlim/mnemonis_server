@@ -1,5 +1,3 @@
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import type pg from "pg";
@@ -38,7 +36,7 @@ export interface TestUser {
   op(name: string, body?: unknown): Promise<Response>;
   /** Mints a fresh MCP token straight in the database (the plaintext is returned once). */
   mcpToken(label?: string): Promise<{ id: string; token: string }>;
-  /** Authorization header with an MCP token (/mcp). */
+  /** Authorization header with an MCP token (/api/agent/*). */
   mcpHeaders(token: string, extra?: Record<string, string>): Record<string, string>;
 }
 
@@ -75,7 +73,6 @@ export interface TestServerOptions {
   maxPending?: number;
   limiter?: RateLimiter;
   failureLimiter?: FailureLimiter;
-  mcpFailureLimiter?: FailureLimiter;
   agentFailureLimiter?: FailureLimiter;
   contractLimiter?: FailureLimiter;
   readLimiter?: RateLimiter;
@@ -129,7 +126,6 @@ export async function startTestServer(opts: TestServerOptions = {}): Promise<Tes
     limiter: opts.limiter ?? createRateLimiter(),
     // Every test request comes from 127.0.0.1: keep the per-client limiters out of the way unless a test sets them.
     failureLimiter: opts.failureLimiter ?? noLimit,
-    mcpFailureLimiter: opts.mcpFailureLimiter ?? noLimit,
     agentFailureLimiter: opts.agentFailureLimiter ?? noLimit,
     contractLimiter: opts.contractLimiter ?? noLimit,
     readLimiter: opts.readLimiter,
@@ -234,19 +230,26 @@ export function rawRequest(
   });
 }
 
-type ToolResult = { isError?: boolean; content: { type: string; text: string }[] };
-
-/** Connects an MCP SDK client to /mcp with the given headers; the caller closes it. */
-export async function connectMcp(url: string, headers: Record<string, string>, name = "test-agent"): Promise<Client> {
-  const client = new Client({ name, version: "1.0.0" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`${url}/mcp`), { requestInit: { headers } }));
-  return client;
+/** What the old MCP-SDK client was for the tests: an mn_ token plus the client name, talking to /api/agent/* directly. */
+export interface AgentClient {
+  url: string;
+  token: string;
+  name: string;
 }
 
-export async function callTool(c: Client, name: string, args: Record<string, unknown> = {}) {
-  const r = (await c.callTool({ name, arguments: args })) as ToolResult;
-  const data = JSON.parse(r.content[0].text) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
-  return { isError: r.isError === true, data, raw: r.content[0].text };
+/** An agent "connection" (no network round trip): the Authorization header carries the mn_ token, `name` is the announced client. */
+export async function connectMcp(url: string, headers: Record<string, string>, name = "test-agent"): Promise<AgentClient> {
+  const token = /^Bearer (.+)$/.exec(headers.Authorization ?? "")?.[1];
+  if (!token) throw new Error("connectMcp: no bearer token");
+  return { url, token, name };
+}
+
+/** Calls one tool through POST /api/agent/memory/<tool>; `isError` is any non-200, `data` the JSON body ({error:{code,message}} on errors). */
+export async function callTool(c: AgentClient, name: string, args: Record<string, unknown> = {}) {
+  const r = await agentPost(c.url, c.token, name, args, { "X-Mnemonis-Client": c.name });
+  const raw = await r.text();
+  const data = JSON.parse(raw) as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  return { isError: r.status !== 200, status: r.status, data, raw };
 }
 
 /**

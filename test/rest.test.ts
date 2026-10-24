@@ -28,13 +28,13 @@ describe("authentication", () => {
     expect(text).not.toContain("Secret");
   });
 
-  it("rejects missing and wrong credentials with 401 (state, export, ops, mcp)", async () => {
+  it("rejects missing and wrong credentials with 401 (state, export, ops, agent)", async () => {
     for (const [method, path] of [
       ["GET", "/api/state"],
       ["GET", "/api/export"],
       ["PUT", "/api/state"],
       ["POST", "/api/ops/createMemory"],
-      ["POST", "/mcp"],
+      ["POST", "/api/agent/memory/status"],
     ] as const) {
       expect((await fetch(`${t.url}${path}`, { method })).status).toBe(401);
       const wrong = await fetch(`${t.url}${path}`, { method, headers: { Authorization: "Bearer nope" } });
@@ -74,11 +74,11 @@ describe("Host and Origin validation", () => {
     expect((await rawRequest(t.port, { path: "/api/health", host: `localhost:${t.port + 1}`, headers: h })).status).toBe(403);
     expect((await rawRequest(t.port, { path: "/api/health", host: `localhost:${t.port}`, headers: h })).status).toBe(200);
     expect((await rawRequest(t.port, { path: "/api/health", host: `127.0.0.1:${t.port}`, headers: h })).status).toBe(200);
-    expect((await rawRequest(t.port, { path: "/mcp", method: "POST", host: "evil.test", headers: h })).status).toBe(403);
+    expect((await rawRequest(t.port, { path: "/api/agent/ping", host: "evil.test", headers: h })).status).toBe(403);
   });
 
-  it("403 for a disallowed Origin on REST and /mcp, even with a valid token", async () => {
-    for (const path of ["/api/state", "/api/health", "/mcp"]) {
+  it("403 for a disallowed Origin on REST and /api/agent, even with a valid token", async () => {
+    for (const path of ["/api/state", "/api/health", "/api/agent/ping"]) {
       const r = await fetch(`${t.url}${path}`, { headers: t.headers({ Origin: "http://evil.test" }) });
       expect(r.status).toBe(403);
       expect(r.headers.get("access-control-allow-origin")).toBeNull();

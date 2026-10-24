@@ -2,17 +2,15 @@ import { serve } from "@hono/node-server";
 import type { Server as HttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Hono } from "hono";
-import { bodyLimit } from "hono/body-limit";
 import type { AccountService } from "../auth/accounts.js";
 import type { AuditLog } from "../audit.js";
 import { agentOriginGuard, registerAgentRoutes } from "../agent/routes.js";
-import { createMcpHandler } from "../mcp/server.js";
 import { createRateLimiter, type RateLimiter } from "../service/guards.js";
 import type { MemoryServices } from "../service/memoryService.js";
 import { createAuthMiddleware, createFailureLimiter, type AppEnv, type FailureLimiter } from "./auth.js";
 import { createAuthLimiters, registerPublicAuth, type AuthLimiters } from "./authRoutes.js";
 import { corsGuard, errorBody, hostGuard } from "./cors.js";
-import { healthBody, MAX_BODY_BYTES, registerRest, tooBig } from "./rest.js";
+import { healthBody, registerRest } from "./rest.js";
 
 export interface AppOptions {
   services: MemoryServices;
@@ -25,10 +23,8 @@ export interface AppOptions {
   trustProxy?: boolean;
   getPort: () => number;
   limiter?: RateLimiter;
-  /** Counts failed credential checks on /api/* (session), per client. Separate from the /mcp limiter. */
+  /** Counts failed credential checks on /api/* (session), per client. Separate from the /api/agent limiter. */
   failureLimiter?: FailureLimiter;
-  /** Counts failed credential checks on /mcp, per client (its own instance: failures on one surface never lock out the other). */
-  mcpFailureLimiter?: FailureLimiter;
   /** Per-client limiters of the public register / login / config endpoints. */
   authLimiters?: AuthLimiters;
   maxPending?: number;
@@ -38,7 +34,7 @@ export interface AppOptions {
   agentFailureLimiter?: FailureLimiter;
   /** Limiter of the public GET /api/agent/contract. */
   contractLimiter?: FailureLimiter;
-  /** The MCP adapter URL published by GET /api/auth/config (null = none). */
+  /** The MCP adapter URL published by GET /api/auth/config and named by the 410 of /mcp (null = none). */
   mcpUrl?: string | null;
 }
 
@@ -48,7 +44,6 @@ export function createApp(opts: AppOptions): Hono<AppEnv> {
   const limiter = opts.limiter ?? createRateLimiter();
   const authOpts = { accounts: opts.accounts, trustProxy: opts.trustProxy ?? false };
   const apiFailures = opts.failureLimiter ?? createFailureLimiter();
-  const mcpFailures = opts.mcpFailureLimiter ?? createFailureLimiter();
 
   app.use("*", hostGuard(guard));
   app.use("/api/agent/*", agentOriginGuard); // before CORS: the agent surface never answers (or allows) a browser origin
@@ -90,12 +85,17 @@ export function createApp(opts: AppOptions): Hono<AppEnv> {
   app.use("/api/*", createAuthMiddleware("session", { ...authOpts, failureLimiter: apiFailures }));
   registerRest(app, { services: opts.services, audit: opts.audit, accounts: opts.accounts, trustProxy: authOpts.trustProxy });
 
-  const mcp = createMcpHandler({ services: opts.services, audit: opts.audit, limiter, maxPending: opts.maxPending });
-  app.use("/mcp", createAuthMiddleware("mcp", { ...authOpts, failureLimiter: mcpFailures }));
-  app.all("/mcp", bodyLimit({ maxSize: MAX_BODY_BYTES, onError: tooBig }), (c) => {
-    const a = c.get("auth");
-    return mcp(c, { userId: a.userId, tokenId: a.tokenId! });
-  });
+  // The MCP endpoint left this server: it is served by the separate mnemonis_mcp adapter. For one release /mcp answers
+  // 410 with the new URL (then it will be a plain 404).
+  app.all("/mcp", (c) =>
+    c.json(
+      errorBody(
+        "gone",
+        opts.mcpUrl ? `MCP is no longer served by this server. Use the MCP adapter at ${opts.mcpUrl}` : "MCP is no longer served by this server. Use the separate Mnemonis MCP adapter.",
+      ),
+      410,
+    ),
+  );
 
   app.notFound((c) => c.json(errorBody("not_found", "Not found"), 404));
   app.onError((e, c) => {

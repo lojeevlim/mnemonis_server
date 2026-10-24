@@ -12,18 +12,17 @@ afterEach(async () => {
 });
 
 const json = { "Content-Type": "application/json" };
-const MCP = { ...json, Accept: "application/json, text/event-stream" };
-const initBody = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "x", version: "0" } } });
 const bearer = (c: string) => ({ Authorization: `Bearer ${c}` });
-const mcp = (headers: Record<string, string>, query = "") => fetch(`${t.url}/mcp${query}`, { method: "POST", headers: { ...MCP, ...headers }, body: initBody });
+/** The agent surface: GET /api/agent/ping is 200 for a valid mn_ token, the uniform 401 otherwise. */
+const mcp = (headers: Record<string, string>, query = "") => fetch(`${t.url}/api/agent/ping${query}`, { headers: { "X-Mnemonis-Contract": "1", ...headers } });
 
 async function shape(r: Response) {
-  const headers = [...r.headers.entries()].filter(([k]) => k !== "date").sort(([a], [b]) => a.localeCompare(b));
+  const headers = [...r.headers.entries()].filter(([k]) => k !== "date" && k !== "x-request-id").sort(([a], [b]) => a.localeCompare(b));
   return { status: r.status, body: await r.text(), headers };
 }
 
-describe("surface separation: sessions only on /api, mn_ tokens only on /mcp", () => {
-  it("a login session is a 401 on /mcp, identical to no credentials", async () => {
+describe("surface separation: sessions only on /api, mn_ tokens only on /api/agent", () => {
+  it("a login session is a 401 on /api/agent, identical to no credentials", async () => {
     const nothing = await shape(await mcp({}));
     expect(nothing.status).toBe(401);
     expect(await shape(await mcp(bearer(t.a.session)))).toEqual(nothing);

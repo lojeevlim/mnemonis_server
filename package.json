@@ -1,5 +1,5 @@
 {
-  "name": "mnemonis-mcp",
+  "name": "mnemonis-api",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -20,15 +20,10 @@
     "db:up": "docker compose up -d postgres",
     "db:down": "docker compose down",
     "db:migrate": "tsx --env-file-if-exists=.env src/db/migrate.ts",
-    "adapter:dev": "tsx watch adapter/src/index.ts",
-    "adapter:build": "tsc -p adapter/tsconfig.build.json",
-    "adapter:start": "node adapter/dist/index.js",
-    "sync-contract": "node adapter/scripts/sync-contract.mjs --api .",
     "contract:update": "UPDATE_CONTRACT=1 vitest run test/agentContract.test.ts"
   },
   "dependencies": {
     "@hono/node-server": "2.1.5",
-    "@modelcontextprotocol/sdk": "1.32.2",
     "hono": "4.13.13",
     "pg": "8.23.1",
     "zod": "4.6.7"

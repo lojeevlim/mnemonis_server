@@ -1,4 +1,0 @@
-Vendored from the mnemonis_api repo (contract/agent-v1). Do not edit by hand; run `npm run sync-contract`.
-commit: a3bd69a3df3427db6538214011e771a4cb1264cf
-contentSha256: 2f80a7e76233515c5f6a8a87f71273015587ee90ba42c5b9cb5925c3a073fb72
-files: 21

@@ -48,7 +48,7 @@ export function hostGuard(opts: GuardOptions): MiddlewareHandler {
 }
 
 const ALLOW_METHODS = "GET, POST, PUT, DELETE, OPTIONS";
-const ALLOW_HEADERS = "Authorization, Content-Type, If-Match";
+const ALLOW_HEADERS = "Authorization, Content-Type, If-Match, If-None-Match";
 
 /**
  * Origin validation + CORS. Requests without an Origin header (curl, Claude Code, server-to-server) pass;

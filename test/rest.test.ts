@@ -111,7 +111,7 @@ describe("CORS preflight", () => {
     expect(r.status).toBe(204);
     expect(r.headers.get("access-control-allow-origin")).toBe(ORIGIN);
     expect(r.headers.get("access-control-allow-methods")).toBe("GET, POST, PUT, DELETE, OPTIONS");
-    expect(r.headers.get("access-control-allow-headers")).toBe("Authorization, Content-Type, If-Match");
+    expect(r.headers.get("access-control-allow-headers")).toBe("Authorization, Content-Type, If-Match, If-None-Match");
   });
 
   it("denies other origins", async () => {

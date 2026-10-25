@@ -247,3 +247,162 @@ describe("import / export round trip", () => {
     await expect(service.getMemory("x")).rejects.toBeInstanceOf(DomainError);
   });
 });
+
+describe("title-prefix auto-links (<project>: <data> -> <project>)", () => {
+  const partOf = async (id: string, includePending = true) =>
+    (await service.listRelations(id, { includePending })).filter((r) => r.label === "part of");
+
+  it("an agent save of `VT: run build` proposes a pending link that is visible only after approval", async () => {
+    const parent = (await service.createMemory({ title: "VT", actor: USER })).value;
+    const w = createAgentWriter({ service, clientName: "bot" });
+    const child = (await w.save({ title: "VT: run build" })).value;
+
+    const [rel] = await partOf(child.id);
+    expect(rel).toMatchObject({
+      fromId: child.id,
+      toId: parent.id,
+      status: "pending",
+      provenance: { origin: "process", createdBy: "bot", process: "title-prefix" },
+    });
+    expect(await partOf(child.id, false)).toHaveLength(0); // not in memory_related-style listing yet
+
+    const pend = await service.pendingChanges();
+    const revisionId = pend.find((p) => p.memoryId === child.id)!.revisionId;
+    await service.approveRevision({ revisionId, actor: USER });
+    expect(await partOf(child.id, false)).toHaveLength(0); // saving the memory does not approve the link
+    expect((await partOf(child.id))).toHaveLength(1); // and no duplicate was created
+
+    await service.approveRelation({ relationId: rel.id, actor: USER });
+    expect(await partOf(child.id, false)).toMatchObject([{ id: rel.id, status: "saved", toId: parent.id }]);
+    expect(await partOf(parent.id, false)).toHaveLength(1);
+  });
+
+  it("approveAll approves the memory and its auto-link together", async () => {
+    await service.createMemory({ title: "VT", actor: USER });
+    const w = createAgentWriter({ service, clientName: "bot" });
+    const child = (await w.save({ title: "VT: deploy" })).value;
+    const r = await service.approveAllDetailed({ actor: USER });
+    expect(r.value.approvedRevisionIds).toHaveLength(1);
+    expect(await partOf(child.id, false)).toHaveLength(1);
+    expect(await service.pendingCount()).toBe(0);
+  });
+
+  it("a user rename drops the stale saved link", async () => {
+    const parent = (await service.createMemory({ title: "VT", actor: USER })).value;
+    const child = (await service.createMemory({ title: "VT: x", actor: USER })).value;
+    expect(await partOf(child.id, false)).toMatchObject([{ toId: parent.id, status: "saved" }]);
+    await service.updateMemory({ id: child.id, patch: { title: "Other: x" }, actor: USER });
+    expect(await partOf(child.id)).toHaveLength(0);
+    expect(await partOf(parent.id)).toHaveLength(0);
+  });
+});
+
+describe("title-prefix marker cannot be forged by an agent", () => {
+  it("an agent name equal to the reserved process is renamed (case-insensitive)", () => {
+    expect(agentActor("title-prefix").name).toBe("title-prefix-client");
+    expect(agentActor("  Title-Prefix ").name).toBe("Title-Prefix-client");
+    expect(agentActor("title-prefix-x").name).toBe("title-prefix-x");
+  });
+
+  it("MCP memory_link from a client named `title-prefix` never yields process title-prefix", async () => {
+    const a = (await service.createMemory({ title: "A", actor: USER })).value;
+    const b = (await service.createMemory({ title: "B", actor: USER })).value;
+    const w = createAgentWriter({ service, clientName: "title-prefix" });
+    const rel = (await w.link({ fromId: a.id, toId: b.id, label: "part of" })).value;
+    expect(rel.provenance).toMatchObject({ origin: "process", createdBy: "title-prefix-client", process: "title-prefix-client" });
+  });
+
+  it("topic-tag is reserved too: an agent name equal to it (any case/spacing) is renamed", () => {
+    expect(agentActor("topic-tag").name).toBe("topic-tag-client");
+    expect(agentActor(" Topic-Tag ").name).toBe("Topic-Tag-client");
+    expect(agentActor("topic-tags").name).toBe("topic-tags");
+  });
+
+  it("MCP memory_link from a client named `topic-tag` gets process topic-tag-client", async () => {
+    const a = (await service.createMemory({ title: "A", actor: USER })).value;
+    const b = (await service.createMemory({ title: "B", actor: USER })).value;
+    const w = createAgentWriter({ service, clientName: "topic-tag" });
+    const rel = (await w.link({ fromId: a.id, toId: b.id, label: "shares topic: x" })).value;
+    expect(rel.provenance).toMatchObject({ origin: "process", createdBy: "topic-tag-client", process: "topic-tag-client" });
+  });
+
+  it("the service default provenance is safe even for a directly constructed reserved agent actor", async () => {
+    const a = (await service.createMemory({ title: "A", actor: USER })).value;
+    const b = (await service.createMemory({ title: "B", actor: USER })).value;
+    const rel = (await service.addRelation({ fromId: a.id, toId: b.id, label: "part of", actor: { kind: "agent", name: "title-prefix" } })).value;
+    expect(rel.provenance.process).toBe("title-prefix-client");
+  });
+});
+
+describe("topic auto-links (shared tag across projects)", () => {
+  const topicLinks = async (id: string, includePending = true) =>
+    (await service.listRelations(id, { includePending })).filter((r) => r.label.startsWith("shares topic: "));
+
+  it("an agent save sharing a tag with another project proposes one pending link, visible only after approval", async () => {
+    const a = (await service.createMemory({ title: "A: stripe notes", tags: ["stripe"], actor: USER })).value;
+    const w = createAgentWriter({ service, clientName: "bot" });
+    const b = (await w.save({ title: "B: payments", tags: ["stripe"] })).value;
+
+    const links = await topicLinks(b.id);
+    expect(links).toHaveLength(1);
+    expect(links[0]).toMatchObject({
+      label: "shares topic: stripe",
+      status: "pending",
+      provenance: { origin: "process", createdBy: "bot", process: "topic-tag" },
+    });
+    expect([links[0].fromId, links[0].toId].sort()).toEqual([a.id, b.id].sort());
+    expect(await topicLinks(b.id, false)).toHaveLength(0);
+    expect(await topicLinks(a.id, false)).toHaveLength(0);
+
+    const pend = await service.pendingChanges();
+    await service.approveRevision({ revisionId: pend.find((p) => p.memoryId === b.id)!.revisionId, actor: USER });
+    expect(await topicLinks(b.id, false)).toHaveLength(0); // approving the memory does not approve the link
+    await service.approveRelation({ relationId: links[0].id, actor: USER });
+    expect(await topicLinks(b.id, false)).toHaveLength(1);
+    expect(await topicLinks(a.id, false)).toHaveLength(1);
+  });
+
+  it("approveAll approves the memory and its topic link; a user removing the tag drops the saved link", async () => {
+    const a = (await service.createMemory({ title: "A: stripe notes", tags: ["stripe"], actor: USER })).value;
+    const w = createAgentWriter({ service, clientName: "bot" });
+    const b = (await w.save({ title: "B: payments", tags: ["stripe"] })).value;
+    const r = await service.approveAllDetailed({ actor: USER });
+    expect(r.value.approvedRevisionIds).toHaveLength(1);
+    expect(await topicLinks(b.id, false)).toHaveLength(1);
+    expect(await service.pendingCount()).toBe(0);
+
+    await service.updateMemory({ id: b.id, patch: { tags: [] }, actor: USER });
+    expect(await topicLinks(b.id)).toHaveLength(0);
+    expect(await topicLinks(a.id)).toHaveLength(0);
+  });
+
+  it("memories of the same project are not linked", async () => {
+    await service.createMemory({ title: "A: stripe notes", tags: ["stripe"], actor: USER });
+    const w = createAgentWriter({ service, clientName: "bot" });
+    const b = (await w.save({ title: "A: webhooks", tags: ["stripe"] })).value;
+    expect(await topicLinks(b.id)).toHaveLength(0);
+  });
+
+  it("a burst is bounded (3 per project, 12 per call) and the inbox cap check is unchanged", async () => {
+    for (let p = 1; p <= 5; p++) {
+      for (let i = 1; i <= 5; i++) await service.createMemory({ title: `P${p}: note ${i}`, tags: ["stripe"], actor: USER });
+    }
+    const w = createAgentWriter({ service, clientName: "bot", maxPending: 14 });
+    const m = (await w.save({ title: "Z: payments", tags: ["stripe"] })).value;
+    const links = await topicLinks(m.id);
+    expect(links).toHaveLength(12);
+    const perProject = new Map<string, number>();
+    for (const l of links) {
+      const other = await service.getMemory(l.fromId === m.id ? l.toId : l.fromId);
+      const proj = other.title.split(":")[0];
+      perProject.set(proj, (perProject.get(proj) ?? 0) + 1);
+    }
+    expect(perProject.size).toBe(4);
+    for (const n of perProject.values()) expect(n).toBeLessThanOrEqual(3);
+
+    // 1 proposal + 12 links = 13 pending < cap 14: one more save is still allowed; the next is refused.
+    expect(pendingAgentItems((await service.getState()).state)).toBe(13);
+    await w.save({ title: "Y: other" }); // 13 < 14 still allowed (14 pending afterwards)
+    expect(await code(w.save({ title: "X: other" }))).toBe("inbox_full");
+  });
+});

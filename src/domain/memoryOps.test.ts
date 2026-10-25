@@ -4,7 +4,7 @@ import { addRelation, createCollection, deleteCollection, listRelations, removeR
 import { getMemory, listMemories, memoryHistory, pendingChanges, timeline } from "./queries.js";
 import { A, AGENT, seedSaved, setup, USER } from "./testUtils.js";
 import { createSequentialContext } from "./context.js";
-import { approveRevision } from "./versioning.js";
+import { approveAll, approveRevision, rejectRevision } from "./versioning.js";
 
 describe("user writes auto-save", () => {
   it("creates a memory that is saved immediately with an auto note", () => {
@@ -285,5 +285,177 @@ describe("relations and collections", () => {
     expect(Object.keys(deleteCollection(empty.state, { id: empty.value.id }).state.collections)).toHaveLength(1);
     const pendingOnly = createMemory(empty.state, ctx, { title: "p", collectionId: empty.value.id, actor: AGENT }).state;
     expect(() => deleteCollection(pendingOnly, { id: empty.value.id })).toThrow(/memories/);
+  });
+});
+
+describe("title-prefix auto-relations", () => {
+  const rels = (s: ReturnType<typeof setup>["state"], id?: string) => listRelations(s, id, { includePending: true });
+  const mk = (s: ReturnType<typeof setup>["state"], ctx: ReturnType<typeof setup>["ctx"], title: string, actor = USER) =>
+    createMemory(s, ctx, { title, actor });
+
+  it("links a child to an existing parent (case-insensitive) as part of", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT");
+    const c = mk(p.state, ctx, "vt : run build");
+    expect(rels(c.state)).toHaveLength(1);
+    expect(rels(c.state)[0]).toMatchObject({
+      fromId: c.value.id,
+      toId: p.value.id,
+      label: "part of",
+      status: "saved",
+      provenance: { origin: "process", process: "title-prefix" },
+    });
+  });
+
+  it("backfills children when the parent is created later", () => {
+    const { ctx, state } = setup();
+    const a = mk(state, ctx, "VT: run build");
+    const b = mk(a.state, ctx, "VT: coding convention");
+    expect(rels(b.state)).toHaveLength(0);
+    const p = mk(b.state, ctx, "VT");
+    expect(rels(p.state).map((r) => [r.fromId, r.toId]).sort()).toEqual(
+      [[a.value.id, p.value.id], [b.value.id, p.value.id]].sort(),
+    );
+  });
+
+  it("creates no relation without a parent, with an archived parent, or for a non-prefix title", () => {
+    const { ctx, state } = setup();
+    const lone = mk(state, ctx, "VT: x");
+    expect(rels(lone.state)).toHaveLength(0);
+    const p = mk(lone.state, ctx, "VT");
+    const arch = archiveMemory(p.state, ctx, { id: p.value.id, actor: USER });
+    const c = mk(arch.state, ctx, "VT: y");
+    expect(rels(c.state, c.value.id)).toHaveLength(0);
+    expect(rels(mk(c.state, ctx, "VT x").state, undefined).length).toBe(rels(c.state).length);
+  });
+
+  it("is idempotent when the title is touched again", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT");
+    const c = mk(p.state, ctx, "VT: a");
+    const u = updateMemory(c.state, ctx, { id: c.value.id, patch: { title: "VT: b" }, actor: USER });
+    const u2 = updateMemory(u.state, ctx, { id: c.value.id, patch: { content: "x" }, actor: USER });
+    expect(rels(u2.state)).toHaveLength(1);
+  });
+
+  it("moves the link on rename and removes it when the prefix goes away", () => {
+    const { ctx, state } = setup();
+    const a = mk(state, ctx, "VT");
+    const b = mk(a.state, ctx, "XY");
+    const c = mk(b.state, ctx, "VT: a");
+    const toXy = updateMemory(c.state, ctx, { id: c.value.id, patch: { title: "XY: a" }, actor: USER });
+    expect(rels(toXy.state).map((r) => r.toId)).toEqual([b.value.id]);
+    const plain = updateMemory(toXy.state, ctx, { id: c.value.id, patch: { title: "plain" }, actor: USER });
+    expect(rels(plain.state)).toHaveLength(0);
+  });
+
+  it("preserves manual relations, even between the same memories", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT");
+    const c = mk(p.state, ctx, "VT: a");
+    const manual = addRelation(c.state, ctx, {
+      fromId: c.value.id,
+      toId: p.value.id,
+      label: "see also",
+      provenance: { origin: "user", createdBy: A },
+      actor: USER,
+    });
+    const renamed = updateMemory(manual.state, ctx, { id: c.value.id, patch: { title: "plain" }, actor: USER });
+    expect(rels(renamed.state).map((r) => r.label)).toEqual(["see also"]);
+  });
+
+  it("agent save yields a pending link that approves with the memory", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT");
+    const c = mk(p.state, ctx, "VT: a", AGENT);
+    expect(rels(c.state)).toHaveLength(1);
+    expect(rels(c.state)[0]).toMatchObject({ status: "pending", provenance: { createdBy: "bot" } });
+    expect(listRelations(c.state)).toHaveLength(0);
+    const approved = approveAll(c.state, ctx, { actor: USER });
+    expect(listRelations(approved.state)).toHaveLength(1);
+  });
+
+  it("agent-proposed parent title links existing children as pending", () => {
+    const { ctx, state } = setup();
+    const c = mk(state, ctx, "VT: a");
+    const p = mk(c.state, ctx, "VT", AGENT);
+    expect(rels(p.state)).toHaveLength(1);
+    expect(rels(p.state)[0]).toMatchObject({ status: "pending", fromId: c.value.id, toId: p.value.id });
+  });
+
+  const saved = (s: ReturnType<typeof setup>["state"]) => listRelations(s).map((r) => [r.fromId, r.toId]);
+
+  it("D1: agent rename moves the saved link to the new parent on approval, without duplicates", () => {
+    const { ctx, state } = setup();
+    const vt = mk(state, ctx, "VT");
+    const xy = mk(vt.state, ctx, "XY");
+    const c = mk(xy.state, ctx, "VT: a");
+    const ren = updateMemory(c.state, ctx, { id: c.value.id, patch: { title: "XY: a" }, actor: AGENT });
+    const approved = approveAll(ren.state, ctx, { actor: USER });
+    expect(saved(approved.state)).toEqual([[c.value.id, xy.value.id]]);
+    expect(rels(approved.state)).toHaveLength(1);
+    // Single-revision approval path, then the pending link is approved by the user.
+    const one = approveRevision(ren.state, ctx, { revisionId: pendingChanges(ren.state)[0].revisionId, actor: USER });
+    expect(rels(one.state, c.value.id).filter((r) => r.status !== "rejected")).toHaveLength(1);
+  });
+
+  it("D2a: agent renaming a parent drops the saved child link on approval", () => {
+    const { ctx, state } = setup();
+    const vt = mk(state, ctx, "VT");
+    const c = mk(vt.state, ctx, "VT: a");
+    expect(saved(c.state)).toHaveLength(1);
+    const ren = updateMemory(c.state, ctx, { id: vt.value.id, patch: { title: "VT2" }, actor: AGENT });
+    const approved = approveAll(ren.state, ctx, { actor: USER });
+    expect(saved(approved.state)).toEqual([]);
+  });
+
+  it("D2b: user child written against an agent-created parent is backfilled when the parent is approved", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT", AGENT);
+    const c = mk(p.state, ctx, "VT: a");
+    expect(rels(c.state)).toHaveLength(0);
+    const approved = approveAll(c.state, ctx, { actor: USER });
+    expect(saved(approved.state)).toEqual([[c.value.id, p.value.id]]);
+    // Same through the single-revision path.
+    const one = approveRevision(c.state, ctx, { revisionId: pendingChanges(c.state)[0].revisionId, actor: USER });
+    expect(saved(one.state)).toEqual([[c.value.id, p.value.id]]);
+  });
+
+  it("an agent child and agent parent approved together end with exactly one saved link", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT", AGENT);
+    const c = mk(p.state, ctx, "VT: a", AGENT);
+    const approved = approveAll(c.state, ctx, { actor: USER });
+    expect(saved(approved.state)).toEqual([[c.value.id, p.value.id]]);
+    expect(rels(approved.state).filter((r) => r.status !== "rejected")).toHaveLength(1);
+  });
+
+  it("a rejected agent rename withdraws the pending links it proposed", () => {
+    const { ctx, state } = setup();
+    const vt = mk(state, ctx, "VT");
+    const xy = mk(vt.state, ctx, "XY");
+    const c = mk(xy.state, ctx, "VT: a");
+    const ren = updateMemory(c.state, ctx, { id: c.value.id, patch: { title: "XY: a" }, actor: AGENT });
+    expect(rels(ren.state).some((r) => r.status === "pending")).toBe(true);
+    const rejected = rejectRevision(ren.state, ctx, { revisionId: pendingChanges(ren.state)[0].revisionId, actor: USER });
+    expect(rels(rejected.state).map((r) => [r.fromId, r.toId])).toEqual([[c.value.id, vt.value.id]]);
+  });
+
+  it("re-proposes a link the user removed once a title changes again (removal is not remembered)", () => {
+    const { ctx, state } = setup();
+    const p = mk(state, ctx, "VT");
+    const c = mk(p.state, ctx, "VT: a");
+    const removed = removeRelation(c.state, { id: rels(c.state)[0].id, actor: USER }, ctx);
+    expect(rels(removed.state)).toHaveLength(0);
+    const renamed = updateMemory(removed.state, ctx, { id: c.value.id, patch: { title: "VT: b" }, actor: USER });
+    expect(saved(renamed.state)).toEqual([[c.value.id, p.value.id]]);
+  });
+
+  it("links a child to every memory with the parent title", () => {
+    const { ctx, state } = setup();
+    const p1 = mk(state, ctx, "VT");
+    const p2 = mk(p1.state, ctx, "vt");
+    const c = mk(p2.state, ctx, "VT: a");
+    expect(rels(c.state).map((r) => r.toId).sort()).toEqual([p1.value.id, p2.value.id].sort());
   });
 });

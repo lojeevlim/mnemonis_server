@@ -7,50 +7,81 @@ import { currentSavedRevision, getMemory, listMemories, memoryIdsWithSaved, pend
 const hasSaved = (state: WorkspaceState, memoryId: string): boolean => !!currentSavedRevision(state, memoryId);
 
 /**
- * Adds a relation.
- *  - user actor: saved at once; both endpoints must have a saved revision.
- *  - agent actor: PENDING until a user approves it; an endpoint may itself be a pending (never yet saved) memory.
- * Rejected relations do not block proposing the same link again.
+ * Per-table cache of `Object.values(relations)`. Scanning a big relation table is the hot path of topic
+ * linking, and a write that only ADDS relations can hand the old list on to the new table (`[...list, ...added]`)
+ * instead of re-enumerating it.
+ *
+ * INVARIANT: relation tables and relation objects are immutable once created. Never mutate `state.relations`
+ * (or a relation in it) in place, or the cached list goes stale; always build a new table. The tests freeze every
+ * state to enforce this (see relationCache.test.ts).
+ *
+ * Enumeration order must stay identical to `Object.values`: integer-like ids (canonical array-index keys
+ * 0..2^32-2) are enumerated first in ascending order whatever their insertion order, so a write that adds one
+ * does not pass the list on. Deletions and status changes build new tables with no cache entry.
  */
-export function addRelation(
-  state: WorkspaceState,
+const relationLists = new WeakMap<object, readonly Relation[]>();
+
+/** Same result as `Object.values(table)`, cached per table object. Do not mutate the returned array. */
+export function relationValues(table: WorkspaceState["relations"]): readonly Relation[] {
+  let list = relationLists.get(table);
+  if (!list) {
+    list = Object.values(table);
+    relationLists.set(table, list);
+  }
+  return list;
+}
+
+const isIndexKey = (id: string): boolean => /^(0|[1-9]\d*)$/.test(id) && Number(id) <= 4294967294;
+
+/** Records `list` as the values of the freshly built `table` (callers guarantee it equals Object.values(table)). */
+function remember(table: WorkspaceState["relations"], list: readonly Relation[]): void {
+  relationLists.set(table, list);
+}
+
+export interface AddRelationArgs {
+  fromId: string;
+  toId: string;
+  label: string;
+  provenance: RelationProvenance;
+  id?: string;
+  actor: Actor;
+}
+
+/**
+ * Validates `args` and builds the new relation (shared by addRelation and addRelationsBulk, so both enforce
+ * the very same rules in the very same order). `relations` is only read (id uniqueness); the caller stores it.
+ */
+function buildRelation(
   ctx: DomainContext,
-  args: {
-    fromId: string;
-    toId: string;
-    label: string;
-    provenance: RelationProvenance;
-    id?: string;
-    actor: Actor;
-  },
-): Mutation<Relation> {
+  memories: WorkspaceState["memories"],
+  relations: WorkspaceState["relations"],
+  args: AddRelationArgs,
+  endpointOk: (id: string, isUser: boolean) => boolean,
+  isDuplicate: (fromId: string, toId: string, label: string) => boolean,
+): Relation {
   assertActor(args.actor);
   if (typeof args.label !== "string") throw new DomainError("invalid_input", "label must be a string");
   const label = requireText(args.label, "label");
   assertRelationLimits(label, args.provenance);
   if (args.fromId === args.toId) throw new DomainError("invalid_input", "A memory cannot relate to itself");
   for (const id of [args.fromId, args.toId]) {
-    if (!safeGet(state.memories, id)) throw new DomainError("memory_not_found", `Memory not found: ${id}`);
+    if (!safeGet(memories, id)) throw new DomainError("memory_not_found", `Memory not found: ${id}`);
   }
   const isUser = args.actor.kind === "user";
   for (const id of [args.fromId, args.toId]) {
-    const ok = isUser ? hasSaved(state, id) : !!getMemory(state, id);
-    if (!ok) {
+    if (!endpointOk(id, isUser)) {
       throw new DomainError(
         "endpoint_not_saved",
         isUser ? `Memory has not been saved yet: ${id}` : `Memory has no saved or pending version: ${id}`,
       );
     }
   }
-  const dup = Object.values(state.relations).some(
-    (r) => r.status !== "rejected" && r.fromId === args.fromId && r.toId === args.toId && r.label === label,
-  );
-  if (dup) throw new DomainError("duplicate_relation", "Relation already exists");
+  if (isDuplicate(args.fromId, args.toId, label)) throw new DomainError("duplicate_relation", "Relation already exists");
   if (args.id !== undefined) assertSafeId(args.id, "relation");
-  const id = args.id ?? freshId(ctx, "rel", (x) => Object.hasOwn(state.relations, x));
-  if (safeGet(state.relations, id)) throw new DomainError("duplicate_id", `Relation id already exists: ${id}`);
+  const id = args.id ?? freshId(ctx, "rel", (x) => Object.hasOwn(relations, x));
+  if (safeGet(relations, id)) throw new DomainError("duplicate_id", `Relation id already exists: ${id}`);
   const now = ctx.now();
-  const rel: Relation = {
+  return {
     id,
     fromId: args.fromId,
     toId: args.toId,
@@ -60,7 +91,78 @@ export function addRelation(
     status: isUser ? "saved" : "pending",
     decidedAt: isUser ? now : null,
   };
-  return { state: { ...state, relations: { ...state.relations, [rel.id]: rel } }, value: rel };
+}
+
+/**
+ * Adds a relation.
+ *  - user actor: saved at once; both endpoints must have a saved revision.
+ *  - agent actor: PENDING until a user approves it; an endpoint may itself be a pending (never yet saved) memory.
+ * Rejected relations do not block proposing the same link again.
+ */
+export function addRelation(state: WorkspaceState, ctx: DomainContext, args: AddRelationArgs): Mutation<Relation> {
+  const existing = relationValues(state.relations);
+  const rel = buildRelation(
+    ctx,
+    state.memories,
+    state.relations,
+    args,
+    (id, isUser) => (isUser ? hasSaved(state, id) : !!getMemory(state, id)),
+    (fromId, toId, label) =>
+      existing.some(
+        (r) => r.status !== "rejected" && r.fromId === fromId && r.toId === toId && r.label === label,
+      ),
+  );
+  const relations = { ...state.relations, [rel.id]: rel };
+  if (!isIndexKey(rel.id)) remember(relations, [...existing, rel]);
+  return { state: { ...state, relations }, value: rel };
+}
+
+/**
+ * Adds several relations in order, exactly as repeated addRelation calls would (same validation, ids,
+ * timestamps and duplicate rules, each item seeing the ones added before it), but with one pass over the
+ * existing data and one copy of the relation table. An item failing with a code in `tolerate` is skipped;
+ * any other failure throws (and nothing is returned).
+ */
+export function addRelationsBulk(
+  state: WorkspaceState,
+  ctx: DomainContext,
+  items: AddRelationArgs[],
+  tolerate: ReadonlySet<string> = new Set(),
+): WorkspaceState {
+  if (items.length === 0) return state;
+  const relations = { ...state.relations };
+  const dupKey = (a: string, b: string, l: string): string => `${a}\u0000${b}\u0000${l}`;
+  // Only relations leaving one of the new relations' source memories can duplicate one of them.
+  const sources = new Set(items.map((i) => i.fromId));
+  const dups = new Set<string>();
+  for (const r of relationValues(state.relations)) {
+    if (r.status !== "rejected" && sources.has(r.fromId)) dups.add(dupKey(r.fromId, r.toId, r.label));
+  }
+  // Endpoint checks only depend on revisions, which do not change here: index them once.
+  const saved = memoryIdsWithSaved(state);
+  const pending = new Set<string>();
+  for (const r of Object.values(state.revisions)) if (r.status === "pending") pending.add(r.memoryId);
+  const added: Relation[] = [];
+  for (const args of items) {
+    try {
+      const rel = buildRelation(
+        ctx,
+        state.memories,
+        relations,
+        args,
+        (id, isUser) => saved.has(id) || (!isUser && pending.has(id)),
+        (a, b, l) => dups.has(dupKey(a, b, l)),
+      );
+      relations[rel.id] = rel;
+      added.push(rel);
+      dups.add(dupKey(rel.fromId, rel.toId, rel.label));
+    } catch (e) {
+      if (!(e instanceof DomainError && tolerate.has(e.code))) throw e;
+    }
+  }
+  if (added.length === 0) return state;
+  if (!added.some((r) => isIndexKey(r.id))) remember(relations, [...relationValues(state.relations), ...added]);
+  return { ...state, relations };
 }
 
 /**
@@ -97,7 +199,7 @@ export function listRelations(
   opts: { includePending?: boolean } = {},
 ): Relation[] {
   const saved = memoryIdsWithSaved(state);
-  return Object.values(state.relations).filter(
+  return relationValues(state.relations).filter(
     (r) =>
       (!memoryId || r.fromId === memoryId || r.toId === memoryId) &&
       ((r.status === "saved" && saved.has(r.fromId) && saved.has(r.toId)) ||
@@ -122,7 +224,7 @@ export interface PendingRelation {
 
 /** Relations proposed by agents and waiting for review, oldest first. */
 export function listPendingRelations(state: WorkspaceState): PendingRelation[] {
-  return Object.values(state.relations)
+  return relationValues(state.relations)
     .map((r, i) => ({ r, i }))
     .filter(({ r }) => r.status === "pending")
     .sort((a, b) => (a.r.createdAt === b.r.createdAt ? a.i - b.i : a.r.createdAt < b.r.createdAt ? -1 : 1))
@@ -144,7 +246,7 @@ export function listPendingRelations(state: WorkspaceState): PendingRelation[] {
 export function pendingCount(state: WorkspaceState): number {
   let n = 0;
   for (const r of Object.values(state.revisions)) if (r.status === "pending") n++;
-  for (const r of Object.values(state.relations)) if (r.status === "pending") n++;
+  for (const r of relationValues(state.relations)) if (r.status === "pending") n++;
   return n;
 }
 
@@ -174,6 +276,14 @@ export function approveRelationsIn(state: WorkspaceState, ids: string[], now: ()
     const stamp = now();
     relations[id] = { ...relations[id], status: "saved", decidedAt: stamp };
   }
+  return { ...state, relations };
+}
+
+/** Hard-deletes relations (callers have checked they are SAVED ones a user may remove). */
+export function deleteRelationsIn(state: WorkspaceState, ids: string[]): WorkspaceState {
+  if (ids.length === 0) return state;
+  const relations = { ...state.relations };
+  for (const id of ids) delete relations[id];
   return { ...state, relations };
 }
 
@@ -217,7 +327,7 @@ export function rejectRelation(
  */
 export function rejectOrphanedRelations(state: WorkspaceState, ctx: DomainContext, memoryId: string): WorkspaceState {
   if (hasSaved(state, memoryId) || pendingRevisionFor(state, memoryId)) return state;
-  const ids = Object.values(state.relations)
+  const ids = relationValues(state.relations)
     .filter((r) => (r.status === "pending" || r.status === "saved") && (r.fromId === memoryId || r.toId === memoryId))
     .map((r) => r.id);
   return ids.length ? rejectRelationsIn(state, ids, () => ctx.now()) : state;

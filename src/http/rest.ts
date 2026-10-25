@@ -6,6 +6,7 @@ import { idsOf, type AuditLog } from "../audit.js";
 import { assertActor, MAX_IMPORT_BYTES, type Actor, type Json } from "../domain/index.js";
 import { StoreError } from "../store/types.js";
 import { toErrorInfo } from "../service/errors.js";
+import { agentRelationProvenance, safeAgentName } from "../service/guards.js";
 import type { MemoryService, MemoryServices } from "../service/memoryService.js";
 import { AccountError, type AccountService } from "../auth/accounts.js";
 import { PasswordBusyError } from "../auth/password.js";
@@ -125,7 +126,9 @@ export const OPS = {
   rollbackMemory: op(z.strictObject({ memoryId: id, toRevisionId: id }), (s, a, actor) => s.rollbackMemory({ ...a, actor }), true),
   addRelation: op(
     z.strictObject({ fromId: id, toId: id, label: text(1000), provenance: relProvenance.optional() }),
-    (s, a, actor) => s.addRelation({ ...a, actor }),
+    // An agent never chooses its provenance (it could forge the domain's title-prefix auto-link marker).
+    (s, a, actor) =>
+      s.addRelation({ ...a, actor, ...(actor.kind === "agent" ? { provenance: agentRelationProvenance(actor) } : {}) }),
     true,
   ),
   removeRelation: op(z.strictObject({ id }), (s, a, actor) => s.removeRelation({ ...a, actor })),
@@ -171,7 +174,7 @@ export function effectiveActor(def: Op, claimed: unknown, user: Actor): Actor {
     return user;
   }
   if (claimed.kind !== "agent" || !agentActorSchema.safeParse({ kind: claimed.kind, name: claimed.name.trim() }).success) return user;
-  return { kind: "agent", name: claimed.name.trim() };
+  return { kind: "agent", name: safeAgentName(claimed.name.trim()) };
 }
 
 const cleanName = (n: string): string => {

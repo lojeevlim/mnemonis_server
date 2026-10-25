@@ -12,6 +12,8 @@ import type {
   WorkspaceState,
 } from "./types.js";
 import { assertActor, assertIdentityLimits, assertWithinLimits } from "./limits.js";
+import { autoRelate } from "./titlePrefix.js";
+import { autoRelateTopics } from "./topicLinks.js";
 import { describeChange } from "./versioning.js";
 import { assertSafeId, cloneJson, deepEqual, freshId, normalizeTags, requireText, safeGet } from "./util.js";
 
@@ -138,7 +140,8 @@ export function createMemory(
   };
   assertIdentityLimits(identity);
   const withIdentity: WorkspaceState = { ...state, memories: { ...state.memories, [id]: identity } };
-  const { state: next } = appendRevision(withIdentity, ctx, { memoryId: id, snapshot, actor: input.actor });
+  const { state: appended } = appendRevision(withIdentity, ctx, { memoryId: id, snapshot, actor: input.actor });
+  const next = autoRelateTopics(autoRelate(appended, ctx, input.actor, id), ctx, input.actor, id);
   return { state: next, value: view(next, id) };
 }
 
@@ -161,7 +164,11 @@ export function updateMemory(
     ...(patch.metadata !== undefined && { metadata: cloneJson(patch.metadata) }),
   };
   checkCollection(state, snapshot.collectionId);
-  const { state: next } = appendRevision(state, ctx, { memoryId: args.id, snapshot, actor: args.actor });
+  const { state: appended } = appendRevision(state, ctx, { memoryId: args.id, snapshot, actor: args.actor });
+  const titleChanged = snapshot.title !== before.title;
+  const tagsChanged = !deepEqual(snapshot.tags, before.tags);
+  let next = titleChanged ? autoRelate(appended, ctx, args.actor, args.id) : appended;
+  if (titleChanged || tagsChanged) next = autoRelateTopics(next, ctx, args.actor, args.id);
   return { state: next, value: view(next, args.id) };
 }
 

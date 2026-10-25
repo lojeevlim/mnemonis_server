@@ -19,12 +19,31 @@ export const MAX_PENDING_AGENT_ITEMS = 200;
 export const MAX_RELATION_LABEL = 200;
 const DEFAULT_AGENT_NAME = "claude-code";
 const MAX_ACTOR_NAME = 100;
+/**
+ * Relation provenance.process values the domain reserves for its own auto-links: "title-prefix" (the "part of"
+ * links, src/domain/titlePrefix.ts) and "topic-tag" (the "shares topic: <tag>" links, src/domain/topicLinks.ts).
+ * Plain strings on purpose: an agent name must never equal one, because agent relations use the actor name as
+ * their process, and the marker (label + process) tells the domain which links it may drop or rebuild.
+ * The domain's isAuto/marker checks are exact-match; the case-insensitive compare below is defence in depth.
+ */
+const RESERVED_AGENT_PROCESSES: ReadonlySet<string> = new Set(["title-prefix", "topic-tag"]);
+
+/** Maps an (already trimmed) agent name that collides with a reserved process marker to a safe one. */
+export function safeAgentName(name: string): string {
+  return RESERVED_AGENT_PROCESSES.has(name.toLowerCase()) ? `${name}-client` : name;
+}
 
 /** The ONLY way the MCP path builds an actor: always kind "agent"; the name is cleaned client input. */
 export function agentActor(clientName?: string | null): Actor {
   // eslint-disable-next-line no-control-regex
   const name = (clientName ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").trim().slice(0, MAX_ACTOR_NAME);
-  return { kind: "agent", name: name || DEFAULT_AGENT_NAME };
+  return { kind: "agent", name: safeAgentName(name || DEFAULT_AGENT_NAME) };
+}
+
+/** Server-built provenance for an agent's relation; never client-supplied, never the reserved auto-link process. */
+export function agentRelationProvenance(actor: Actor): { origin: "process"; createdBy: string; process: string } {
+  const name = safeAgentName(actor.name);
+  return { origin: "process", createdBy: name, process: name };
 }
 
 /** Pending items waiting for review that an agent created (memory proposals + links). */
@@ -36,6 +55,10 @@ export function pendingAgentItems(state: WorkspaceState): number {
 }
 
 function assertInboxHasRoom(state: WorkspaceState, cap: number): void {
+  // Note: the domain also creates pending auto-links as part of an agent write ("part of" title-prefix links and
+  // "shares topic: <tag>" topic links), so one write can overshoot this cap by that fan-out. Topic links are
+  // bounded in the domain (12 per call, 3 per project per topic); the overshoot overall is bounded by the
+  // workspace quota (src/store/quota.ts).
   if (pendingAgentItems(state) >= cap) {
     throw new DomainError(
       "inbox_full",
@@ -168,7 +191,7 @@ export function createAgentWriter(opts: AgentWriterOptions): AgentWriter {
           toId,
           label,
           actor,
-          provenance: { origin: "process", createdBy: actor.name, process: actor.name },
+          provenance: agentRelationProvenance(actor),
         });
       });
     },

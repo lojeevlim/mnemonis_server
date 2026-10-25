@@ -7,6 +7,9 @@ import {
   rejectOrphanedRelations,
   rejectRelationsIn,
 } from "./relations.js";
+import { autoRelate, rejectStalePendingLinks } from "./titlePrefix.js";
+import { rejectStaleTopicLinks, topicRelator } from "./topicLinks.js";
+import { deepEqual } from "./util.js";
 import type { Actor, MemoryFieldName, MemorySnapshot, Mutation, Revision, WorkspaceState } from "./types.js";
 
 const hasSavedRevision = (state: WorkspaceState, memoryId: string): boolean =>
@@ -72,6 +75,27 @@ function approveMany(state: WorkspaceState, ctx: DomainContext, ids: string[]): 
   return next;
 }
 
+/**
+ * Re-runs the auto-relations (as the approving user) for each memory whose approved revision changed what they
+ * depend on, so stale saved links drop and missing ones appear: the title-prefix one when the revision created
+ * the memory or changed its title, the topic-tag one when it also changed its tags. `before` is the state prior
+ * to approval (it holds the previous saved titles and tags). A pending agent link for the same pair is reused:
+ * the duplicate check skips creating a second one and it is approved with the other pending links.
+ * The topic index is built once for the whole batch (approving does not change it between memories).
+ */
+function relateApproved(before: WorkspaceState, approved: WorkspaceState, ctx: DomainContext, actor: Actor, ids: string[]): WorkspaceState {
+  let next = approved;
+  const relateTopics = topicRelator(approved, actor);
+  for (const id of ids) {
+    const memoryId = next.revisions[id].memoryId;
+    const prev = currentSavedRevision(before, memoryId)?.snapshot;
+    const snap = next.revisions[id].snapshot;
+    if (prev?.title !== snap.title) next = autoRelate(next, ctx, actor, memoryId);
+    if (!prev || prev.title !== snap.title || !deepEqual(prev.tags, snap.tags)) next = relateTopics(next, ctx, memoryId);
+  }
+  return next;
+}
+
 export function approveRevision(
   state: WorkspaceState,
   ctx: DomainContext,
@@ -80,7 +104,7 @@ export function approveRevision(
   requireUser(args.actor);
   const rev = requirePending(state, args.revisionId);
   requireCurrent(state, rev);
-  const next = approveMany(state, ctx, [rev.id]);
+  const next = relateApproved(state, approveMany(state, ctx, [rev.id]), ctx, args.actor, [rev.id]);
   return { state: next, value: next.revisions[rev.id] };
 }
 
@@ -96,7 +120,8 @@ export function rejectRevision(
     revisions: { ...state.revisions, [rev.id]: { ...rev, status: "rejected", decidedAt: ctx.now() } },
   };
   // A rejected create leaves the memory never saved: its pending links can never be approved.
-  const next = rejectOrphanedRelations(rejected, ctx, rev.memoryId);
+  const orphaned = rejectOrphanedRelations(rejected, ctx, rev.memoryId);
+  const next = rejectStaleTopicLinks(rejectStalePendingLinks(orphaned, ctx, rev.memoryId), ctx, rev.memoryId);
   return { state: next, value: next.revisions[rev.id] };
 }
 
@@ -158,11 +183,16 @@ export function approveAllDetailed(
   requireUser(args.actor);
   const { revIds, relIds, ignored } = selectPending(state, args);
   for (const id of revIds) requireCurrent(state, getRevision(state, id));
-  const approved = approveMany(state, ctx, revIds);
+  const approved = relateApproved(state, approveMany(state, ctx, revIds), ctx, args.actor, revIds);
   const ok: string[] = [];
   const skipped: string[] = [];
   for (const id of relIds) {
     const rel = approved.relations[id];
+    // Withdrawn meanwhile (a stale auto-link dropped by the re-relation above): nothing left to approve.
+    if (rel.status !== "pending") {
+      ignored.push(id);
+      continue;
+    }
     (hasSavedRevision(approved, rel.fromId) && hasSavedRevision(approved, rel.toId) ? ok : skipped).push(id);
   }
   return {
@@ -196,7 +226,10 @@ export function rejectAllDetailed(
     memoryIds.add(revisions[id].memoryId);
   }
   let next = rejectRelationsIn({ ...state, revisions }, relIds, () => ctx.now());
-  for (const m of memoryIds) next = rejectOrphanedRelations(next, ctx, m);
+  for (const m of memoryIds) {
+    next = rejectStalePendingLinks(rejectOrphanedRelations(next, ctx, m), ctx, m);
+    next = rejectStaleTopicLinks(next, ctx, m);
+  }
   return { state: next, value: { rejectedRevisionIds: revIds, rejectedRelationIds: relIds, ignoredIds: ignored } };
 }
 

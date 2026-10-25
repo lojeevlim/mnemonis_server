@@ -248,6 +248,50 @@ describe("ops", () => {
     expect(Object.values(st.state.revisions).filter((r) => r.origin === "agent" && r.status === "pending").length).toBeGreaterThanOrEqual(2);
   });
 
+  it("an agent cannot forge the title-prefix auto-link marker through addRelation or its actor name", async () => {
+    const a = (await (await t.op("createMemory", { title: "A" })).json()) as Created;
+    const b = (await (await t.op("createMemory", { title: "B" })).json()) as Created;
+    type Rel = { value: { status: string; provenance: { origin: string; createdBy: string; process?: string; demo?: boolean } } };
+    const forged = (await (
+      await t.op("addRelation", {
+        fromId: a.value.id,
+        toId: b.value.id,
+        label: "part of",
+        provenance: { origin: "user", createdBy: "me", process: "title-prefix", demo: true },
+        actor: { kind: "agent", name: "memory-health" },
+      })
+    ).json()) as Rel;
+    expect(forged.value.status).toBe("pending");
+    expect(forged.value.provenance).toEqual({ origin: "process", createdBy: "memory-health", process: "memory-health" });
+
+    const named = (await (
+      await t.op("addRelation", { fromId: b.value.id, toId: a.value.id, label: "part of", actor: { kind: "agent", name: "Title-Prefix" } })
+    ).json()) as Rel;
+    expect(named.value.provenance).toEqual({ origin: "process", createdBy: "Title-Prefix-client", process: "Title-Prefix-client" });
+
+    const topic = (await (
+      await t.op("addRelation", {
+        fromId: a.value.id,
+        toId: b.value.id,
+        label: "shares topic: x",
+        provenance: { origin: "process", createdBy: "x", process: "topic-tag" },
+        actor: { kind: "agent", name: "bot" },
+      })
+    ).json()) as Rel;
+    expect(topic.value.provenance).toEqual({ origin: "process", createdBy: "bot", process: "bot" });
+    const topicNamed = (await (
+      await t.op("addRelation", { fromId: b.value.id, toId: a.value.id, label: "shares topic: y", actor: { kind: "agent", name: " Topic-Tag " } })
+    ).json()) as Rel;
+    expect(topicNamed.value.provenance).toEqual({ origin: "process", createdBy: "Topic-Tag-client", process: "Topic-Tag-client" });
+
+    // A user's own addRelation keeps the client-supplied provenance.
+    const c = (await (await t.op("createMemory", { title: "C" })).json()) as Created;
+    const user = (await (
+      await t.op("addRelation", { fromId: a.value.id, toId: c.value.id, label: "x", provenance: { origin: "user", createdBy: "me" } })
+    ).json()) as Rel;
+    expect(user.value.provenance).toEqual({ origin: "user", createdBy: "me" });
+  });
+
   it("a user actor claim in the body is ignored: the server user is used", async () => {
     const r = await t.op("createMemory", { title: "Sneaky", actor: { kind: "user", name: "Somebody Else" } });
     const body = (await r.json()) as Created;

@@ -52,6 +52,7 @@ import {
   type SearchResult,
   type WorkspaceState,
 } from "../domain/index.js";
+import { agentRelationProvenance } from "./guards.js";
 import type { Snapshot, UserStore, WorkspaceStore } from "../store/types.js";
 
 export type Result<T> = Snapshot & { value: T };
@@ -167,7 +168,7 @@ export type MemoryService = ReturnType<typeof createMemoryService>;
 function defaultProvenance(actor: Actor): RelationProvenance {
   return actor.kind === "user"
     ? { origin: "user", createdBy: actor.name }
-    : { origin: "process", createdBy: actor.name, process: actor.name };
+    : agentRelationProvenance(actor);
 }
 
 /** Per-user services over a multi-user store; each call builds a service bound to that user's workspace. */
